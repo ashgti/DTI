@@ -10,9 +10,18 @@ Category:            Compilers/Interpreters, Language
 
 Build-type:          Simple
 
-Cabal-version:       >=1.2
+Cabal-version:       >=1.4
+
+Library
+  Build-Depends:   base >= 4, haskell98, array, parsec, containers, mtl, transformers
+  Extensions:      ExistentialQuantification
+  Hs-Source-Dirs:  src
+  Exposed-Modules: Language.Perl.Core
+                   Language.Perl.Types
+  Other-Modules:   Language.Perl.Parser
 
 Executable dti
-  Main-is:             src/Main.hs
-  Build-depends:       base, haskell98, parsec, containers, mtl, transformers
+  Main-is:             shell.hs
+  Hs-Source-Dirs:      src
+  Build-depends:       base, parsec, containers, mtl, transformers
   

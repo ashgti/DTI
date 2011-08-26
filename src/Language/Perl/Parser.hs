@@ -1,64 +1,15 @@
-module Main where
+module Language.Perl.Parser where
 
-import Monad
-import System.Environment
-import Control.Monad.Error
-import Data.IORef
-import Data.List ( sort )
+import Data.List
 import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.Language
 import Data.Functor.Identity
-import Data.Map
-import Debug.Trace
 import qualified Text.Parsec.Token as P
-import IO hiding (try)
 
--- Data Types --
-
-data Env = Environment { parentEnv :: (Maybe Env)
-                       , bindings :: (IORef [((String, String), IORef PerlVal)])
-                       }
-
-data PerlVal = Scalar String
-             | List [PerlVal]
-             | HastTable (Data.Map.Map String PerlVal)
-             | Number Integer
-             | Float Double
-             | String String
-             | Block [PerlVal]
-             -- | PrimitiveFunc ([PerlVal] -> ThrowsError PerlVal)
-             -- | Func { params :: [String]
-             --        , vararg :: (Maybe String)
-             --        , body :: [PerlVal]
-             --        , closure :: Env
-             --        }
-             | Invoke String [PerlVal]
-             -- | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
-             | Port Handle
-             | EOF
-             | NOP
-             | Nil String
-    deriving (Show)
-
--- |Types of errors that may occur when evaluating Scheme code
-data PerlError = NumArgs Integer [PerlVal] -- ^Invalid number of function arguments
-               | TypeMismatch String PerlVal -- ^Type error
-               | Parser ParseError -- ^Parsing error
-               | BadSpecialForm String PerlVal -- ^Invalid special (built-in) form
-               | NotFunction String String
-               | UnboundVar String String
-               | DivideByZero -- ^Divide by Zero error
-               | NotImplemented String
-               | InternalError String {- ^An internal error within husk; in theory user (Scheme) code
-                                      should never allow one of these errors to be triggered. -}
-               | Default String -- ^Default error
-
-type ThrowsError = Either PerlError
-type IOThrowsError = ErrorT PerlError IO
+import Language.Perl.Types
 
 -- Parser Specification --
-
 
 perlDef :: LanguageDef ()
 perlDef
@@ -66,8 +17,8 @@ perlDef
     { P.commentLine = "#"
     , P.identStart  = identStart
     , P.identLetter = identLetter
-    , P.opStart = oneOf ":!#$%&*+./<=>?@\\^|-~engl"
-    , P.opLetter = oneOf ":!#%&*+./<=>?@\\^|-~qnet"
+    , P.opStart = oneOf ":!$%&*+./<=>?@\\^|-~engl"
+    , P.opLetter = oneOf ":!%&*+./<=>?@\\^|-~qnet"
     , P.reservedNames = reservedNames
     , P.reservedOpNames = ["::", "..", "=", "->", "..."]
     , P.caseSensitive = True
@@ -75,9 +26,9 @@ perlDef
 
 lexer    = P.makeTokenParser perlDef
 
-identStart        = oneOf "$%@&"
+identStart        = oneOf "$%@&*"
 identSecondLetter = letter <|> oneOf "~!@#$%^&*_)(" <|> digit
-identLetter       = letter <|> oneOf "~!@#$%^&*_" <|> digit
+identLetter       = letter <|> oneOf "~!@$%^&*_" <|> digit
 
 reservedNames = ["sub", "my", "our", "local", "if", "elsif", "else", "unless", "package", "use"]
 
@@ -141,46 +92,19 @@ symbol = P.symbol lexer
 reserved = P.reserved lexer
 reservedOp = P.reservedOp lexer
 
--- symbol :: Stream s m Char => ParsecT s u m Char
--- symbol = oneOf "!$%&|*+-/:<=>?@^_~."
-
--- parseIdentifier :: Stream s m Char => ParsecT s u m PerlVal
--- parseIdentifier = do
---   atom <- identifier
---   if atom == "."
---      then parserZero -- Do not match this form
---      else return $ Scalar atom
-
--- parseScalar :: ParsecT String () Identity PerlVal
--- parseScalar = do
---     char '$'
---     name <- parseIndirectObject
---     return $ name
--- 
--- parseIndirectObject :: ParsecT String () Identity PerlVal
--- parseIndirectObject = do
---     word <- identifier
---     return $ Scalar word
-
 parseBlock :: ParsecT String () Identity PerlVal
 parseBlock = between (symbol "{") 
                      (symbol "}") 
                      (do stmts <- many parseStmt
                          return $ Block stmts)
 
--- parseMBlock :: ParsecT String () Identity PerlVal
--- parseMBlock = between (symbol "{") (symbol "}") (remember parseStmtSeq)
-
--- Start a block
--- remember :: ParsecT String () Identity PerlVal
--- remember = StartBlock True
--- 
--- mremember :: ParsecT String () Identity PerlVal
--- mremember = StartBlock False
-
--- 
--- parseIdent :: ParsecT String () Identity PerlVal
--- parseIdent = Scalar identifier
+-- parseSub :: ParsecT String () Identity PerlVal
+-- parseSub = do
+--     string "sub"
+--     spaces
+--     ident <- identifier
+--     spaces
+--     body <- parseBlock
 
 parseMyTerm :: ParsecT String () Identity PerlVal
 parseMyTerm = do
@@ -272,28 +196,3 @@ readExpr :: String -> String
 readExpr input = case parse parseGrammar "" input of
     Left err -> "No match: " ++ show err
     Right val -> "Found " ++ show val
-
-main :: IO ()
-main = do args <- getArgs
-          if not $ Prelude.null args then putStrLn (readExpr (args !! 0))
-              else do
-                  putStrLn "Running some test cases..."
-                  putStrLn (readExpr "3+2")
-                  putStrLn (readExpr "3+3+3")
-                  putStrLn (readExpr "{3+3}; 3+3;")
-                  putStrLn (readExpr "3+$a;")
-                  putStrLn (readExpr "my ($a, $b);")
-                  putStrLn (readExpr "my $a;")
-                  putStrLn (readExpr "my %a;")
-                  putStrLn (readExpr "my &a;")
-                  putStrLn (readExpr "my @a;")
-                  putStrLn (readExpr "print $a;")
-                  putStrLn (readExpr "print($a);")
-                  putStrLn (readExpr "print(1 + 3);")
-                  putStrLn (readExpr "2 == 3")
-                  putStrLn (readExpr "my $a = 3; print $a;")
-                  putStrLn (readExpr "my ($a, $b) = 3, 3;")
-                  putStrLn (readExpr "my ($a, $b) = (3, 3);")
-                  putStrLn (readExpr "($a + 3) + 3;")
-                  putStrLn (readExpr "\"hello\\\"\"")
-                  putStrLn (readExpr "print 3 . 4")
