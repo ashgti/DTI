@@ -1,0 +1,18 @@
+Name:                dti
+Version:             0.1
+Synopsis:            A perl-like interpreter.
+Description:         Hopefully a full perl-5.14 interpreter.
+License:             BSD3
+License-file:        LICENSE
+Author:              John Harrison
+Maintainer:          ash.gti@gmail.com
+Category:            Compilers/Interpreters, Language
+
+Build-type:          Simple
+
+Cabal-version:       >=1.2
+
+Executable dti
+  Main-is:             src/Main.hs
+  Build-depends:       base, haskell98, parsec, containers, mtl, transformers
+  
