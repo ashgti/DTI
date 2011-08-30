@@ -13,15 +13,15 @@ Build-type:          Simple
 Cabal-version:       >=1.4
 
 Library
-  Build-Depends:   base >= 4, haskell98, array, parsec, containers, mtl, transformers
+  Build-Depends:   base >= 4 && < 5, haskell98, array, parsec, containers, mtl, transformers
   Extensions:      ExistentialQuantification
   Hs-Source-Dirs:  src
   Exposed-Modules: Language.Perl.Core
                    Language.Perl.Types
-  Other-Modules:   Language.Perl.Parser
+                   Language.Perl.Parser
 
 Executable dti
   Main-is:             shell.hs
   Hs-Source-Dirs:      src
-  Build-depends:       base, parsec, containers, mtl, transformers
+  Build-depends:       base, parsec, containers, mtl, transformers, haskeline
   

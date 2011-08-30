@@ -5,10 +5,11 @@ import Data.IORef
 import qualified Data.Map
 import Control.Monad.Error
 import Text.Parsec.Error
-import IO
+import System.IO
+import System.IO.Error
 
-data Env = Environment { parentEnv :: (Maybe Env)
-                       , bindings :: (IORef [((String, String), IORef PerlVal)])
+data Env = Environment { parentEnv :: Maybe Env
+                       , bindings :: IORef [((String, String), IORef PerlVal)]
                        } -- lookup via: (namespace, variable)
 
 nullEnv :: IO Env
@@ -21,7 +22,7 @@ data PerlError =
   | TypeMismatch String PerlVal -- ^Type error
   | Parser ParseError -- ^Parsing error
   | BadSpecialForm String PerlVal -- ^Invalid special (built-in) form
-  | NotFunction String String
+  | NotSub String String
   | UnboundVar String String
   | DivideByZero -- ^Divide by Zero error
   | NotImplemented String
@@ -37,7 +38,7 @@ showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected
                                   ++ ", found " ++ show found
 showError (Parser parseErr) = "Parse error at " ++ ": " ++ show parseErr
 showError (BadSpecialForm message form) = message ++ ": " ++ show form
-showError (NotFunction message func) = message ++ ": " ++ show func
+showError (NotSub message func) = message ++ ": " ++ show func
 showError (UnboundVar message varname) = message ++ ": " ++ varname
 showError (DivideByZero) = "Division by zero"
 showError (NotImplemented message) = "Not implemented: " ++ message
@@ -52,6 +53,12 @@ instance Error PerlError where
 type ThrowsError = Either PerlError
 type IOThrowsError = ErrorT PerlError IO
 
+data CallContext = VoidContext | ListContext | ScalarContext | GlobContext
+                 | FunctionContext | ReferenceContext | PlusContext
+                 | AnyOfContext [CallContext]
+
+type Prototype = [CallContext]
+
 data PerlVal =
   {- Scalar Values -}
     Scalar String
@@ -63,12 +70,15 @@ data PerlVal =
   | String String
   | Block [PerlVal]
   | PrimitiveFunc ([PerlVal] -> ThrowsError PerlVal)
-  | Func { body    :: [PerlVal]
-         , closure :: Env
-         }
+  | Sub { name      :: String
+        , body      :: PerlVal
+        , prototype :: Prototype
+        , closure   :: Maybe Env
+        }
   | Invoke String [PerlVal]
   | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
   | Port Handle
+  | Undef
   | EOF
   | NOP
   | Nil String
@@ -76,18 +86,21 @@ data PerlVal =
 showVal :: PerlVal -> String
 showVal (Nil _) = ""
 showVal (EOF) = "#!EOF"
-showVal (NOP) = ";\n"
+showVal (NOP) = ";"
 showVal (String contents) = "\"" ++ contents ++ "\""
 showVal (Number contents) = show contents
 showVal (Float contents) = show contents
 showVal (Scalar name) = name
+showVal (Undef) = "undef"
 showVal (Invoke name args) = "&" ++ name ++ "(" ++ unwordsList args ++ ")"
 showVal (Block contents) = "{"++ unwordsList contents ++"}"
 showVal (List contents) = "(" ++ unwordsList contents ++ ")"
 showVal (HashTable _) = "HASH(0x)"
 showVal (PrimitiveFunc _) = "<primitive>"
-showVal (Func {body = _, closure = _}) =
-  "sub { ... }"
+showVal (Sub { name = name, body = body }) =
+  "sub " ++ name ++ " " ++ case body of
+      Nil a -> a
+      _ -> show body
 showVal (Port _) = "GLOB(0x)"
 showVal (IOFunc _) = "<IO primitive>"
 -- showVal (EvalFunc _) = "<procedure>"
