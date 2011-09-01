@@ -1,5 +1,6 @@
 module Language.Perl.Types where
 
+import Data.List
 import Data.Array
 import Data.IORef
 import qualified Data.Map
@@ -53,9 +54,10 @@ instance Error PerlError where
 type ThrowsError = Either PerlError
 type IOThrowsError = ErrorT PerlError IO
 
-data CallContext = VoidContext | ListContext | ScalarContext | GlobContext
-                 | FunctionContext | ReferenceContext | PlusContext
+data CallContext = ConstContext | VoidContext | ListContext | ScalarContext
+                 | GlobContext | FunctionContext | ReferenceContext | PlusContext
                  | AnyOfContext [CallContext]
+    deriving (Show, Eq)
 
 type Prototype = [CallContext]
 
@@ -75,7 +77,7 @@ data PerlVal =
         , prototype :: Prototype
         , closure   :: Maybe Env
         }
-  | Invoke String [PerlVal]
+  | Invoke String PerlVal
   | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
   | Port Handle
   | Undef
@@ -94,7 +96,7 @@ showVal (Scalar name) = name
 showVal (Undef) = "undef"
 showVal (Invoke name args) = "&" ++ name ++ "(" ++ unwordsList args ++ ")"
 showVal (Block contents) = "{"++ unwordsList contents ++"}"
-showVal (List contents) = "(" ++ unwordsList contents ++ ")"
+showVal (List contents) = "LIST(" ++ unwordsList contents ++ ")"
 showVal (HashTable _) = "HASH(0x)"
 showVal (PrimitiveFunc _) = "<primitive>"
 showVal (Sub { name = name, body = body }) =
@@ -108,7 +110,7 @@ showVal (IOFunc _) = "<IO primitive>"
 instance Show PerlVal where show = showVal
 
 unwordsList :: [PerlVal] -> String
-unwordsList = unwords . map showVal
+unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
 
 --numericContext :: PerlValue -> PerlValue
 --numericContext 

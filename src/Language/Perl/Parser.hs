@@ -3,6 +3,7 @@ module Language.Perl.Parser where
 import Data.List
 import qualified Data.Map as M
 import Data.Char (digitToInt)
+import Data.Maybe
 import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.Language
@@ -54,6 +55,9 @@ comma = P.comma lexer
 arrow = P.symbol lexer "->"
 colon = P.colon lexer
 
+
+-- Copy Pasta from Text.Parsec.Language because it was really close
+-- to what I needed, but still slightly off.
 ident = do{ c <- identStart
           ; cs <- identSecondLetter
           ; css <- many identLetter
@@ -61,6 +65,7 @@ ident = do{ c <- identStart
           }
       <?> "identifier"
 
+{- Parse an Identifier, this means a sigil + a name. -}
 identifier = lexeme $ try $
     do name <- ident
        if isReservedName name
@@ -70,12 +75,14 @@ identifier = lexeme $ try $
 bareIdent = many1 letter
             <?> "identifier"
 
+{- Parse a bare identifier, this is a bare word such as print or foo -}
 bareIdentifier = lexeme $ try $
    do name <- bareIdent
       if isReservedName name
           then unexpected ("reserved word " ++ show name)
           else return name
 
+{- A list of reserved names. -}
 isReservedName = isReserved theReservedNames
 
 isReserved names name
@@ -87,6 +94,7 @@ isReserved names name
                            EQ  -> True
                            GT  -> False
 
+{- Parse a string literal. -}
 stringLiteral = lexeme (
                        do str <- between (char '"')
                                          (char '"' <?> "end of string")
@@ -115,8 +123,6 @@ escapeEmpty     = char '&'
 escapeGap       = do{ many1 space
                     ; char '\\' <?> "end of string gap"
                     }
-
-
 
 -- escape codes
 escapeCode      = charEsc <|> charNum <|> charAscii <|> charControl
@@ -162,20 +168,22 @@ number base baseDigit
             ; seq n (return n)
             }
 
-
 theReservedNames = sort reservedNames
 
 whiteSpace = P.whiteSpace lexer
-lexeme = P.lexeme lexer
+lexeme     = P.lexeme lexer
+symbol     = P.symbol lexer
 
 naturalOrFloat = P.naturalOrFloat lexer
-symbol = P.symbol lexer
 
-reserved = P.reserved lexer
+reserved   = P.reserved lexer
 reservedOp = P.reservedOp lexer
 
-commaSep = P.commaSep lexer
+commaSep  = P.commaSep lexer
+commaSep1 = P.commaSep1 lexer
+-- hashSep p = sepBy p symbol "=>"
 
+{- Parses a block, basically any statements between { and }. -}
 parseBlock :: ParsecT String LexicalInformation Identity PerlVal
 parseBlock = braces (do stmts <- many parseStmt
                         return $ Block stmts)
@@ -187,17 +195,27 @@ parseBlock = braces (do stmts <- many parseStmt
 --     ident <- bareIdentifier
 --     return $ Sub ident (Nil "prototype") [] Nothing
 
+{- Parse subs with names. This will not parse an anonymous sub. -}
 parseSubWithName :: ParsecT String LexicalInformation Identity PerlVal
 parseSubWithName = do
     string "sub"
     whiteSpace
     ident <- bareIdentifier
     whiteSpace
+    
+    -- TODO(ash_gti): Prototpes, see op.c:9089
     body <- do semi
-               return $ Nil "proto"
+               return $ Nil "..."
             <|> parseBlock
+    -- A record of the subs with a recording of their call context
+    modifyState (\st -> LexInfo (currentNamespace st)
+                                (M.insert (currentNamespace st ++ "::" ++ ident)
+                                          (VoidContext)
+                                          (prototypes st)))
     return $ Sub ident body [] Nothing
 
+-- TODO(ash_gti): Add state, local, our, and possibly has
+{- Parse a "my" term. -}
 parseMyTerm :: ParsecT String LexicalInformation Identity PerlVal
 parseMyTerm = do
     string "my"
@@ -207,21 +225,25 @@ parseMyTerm = do
                    <|> parens (do ident <- commaSep identifier
                                   return (map Scalar ident))
                    <?> "Identifier or Identifier List")
-    assignee <- option [] (do whiteSpace
-                              symbol "="
-                              whiteSpace
-                              option [] (commaSep parseExpr) <|> parens (commaSep parseExpr))
-    if null assignee then return $ Invoke "my" idents
-                             else return $ Invoke "=" [Invoke "my" idents, List assignee]
+    assignee <- optionMaybe (do whiteSpace
+                                symbol "="
+                                whiteSpace
+                                option [] (commaSep parseExpr) <|> parens (commaSep parseExpr))
+    if isNothing assignee then return $ Invoke "my" idents
+                          else return $ Invoke "=" [ Invoke "my" idents
+                                                   , fromJust assignee
+                                                   ]
 
+{- Parse a potential sub invocation. -}
 parseInvoke :: ParsecT String LexicalInformation Identity PerlVal
 parseInvoke = do
     word <- bareIdentifier
     whiteSpace
-    args <- option [] arguments
-                      <|> parens arguments
+    args <- option [] (do a <- parseExpr
+                          return $ case a of
+                              List a -> trace "list" a
+                              otherwise -> trace "not list" [a])
     return $ Invoke word args
-    where arguments = commaSep parseExpr
 
 parseTerm :: ParsecT String LexicalInformation Identity PerlVal
 parseTerm = choice [ parseMyTerm
@@ -231,9 +253,13 @@ parseTerm = choice [ parseMyTerm
     
 
 parseExpr :: ParsecT String LexicalInformation Identity PerlVal
-parseExpr = expr
-            <|> parens expr
-            <?> "bad expression expression"
+parseExpr = (try $ parens (do a <- commaSep1 expr
+                              return $ List a))
+        <|> (try $ parens expr)
+        <|> (try $ do a <- commaSep1 expr
+                      return $ List $ trace " aa " a)
+        <|> (try $ trace "yup" expr)
+        <?> "bad expression expression"
     where expr = buildExpressionParser table term 
 
 table   = [ [binary "->" AssocLeft]
@@ -245,12 +271,17 @@ table   = [ [binary "->" AssocLeft]
           , [binary "==" AssocNone, binary "eq" AssocNone, binary "~~" AssocNone]
           , [binary ".." AssocNone, binary "..." AssocNone]
           , [binary "=" AssocRight]
-          , [binary "," AssocLeft, binary "=>" AssocLeft]
+          -- , [binary "," AssocLeft, binary "=>" AssocLeft]
           ]
 
 term = try (do symbol "("
                symbol ")"
                return Undef)
+   <|> (trace "trying prototypes" try (do st <- getState
+                                          ident <- bareIdentifier
+                                          if M.lookup ident (prototypes st) == Just ConstContext
+                                               then return $ Invoke ident []
+                                               else fail "Not found"))
    <|> do ident <- identifier
           return $ Scalar ident
    <|> do x <- stringLiteral
@@ -259,7 +290,9 @@ term = try (do symbol "("
           return $ case num of
               Left val -> Number val
               Right val -> Float val
-   <?> "simple expression"
+   <|> try (do spaces
+               char ','
+               return Undef)
 
 binary  name = Infix (do reservedOp name; return $ \ x y -> Invoke ("Op"++name) [x, y])
 prefix  name = Prefix (do reservedOp name; return $ \ x -> Invoke ("Op"++name) [x])
@@ -273,7 +306,8 @@ parseStmt = choice [ parseBlock
                    ] <?> "Failed"
 
 parseGrammar :: ParsecT String LexicalInformation Identity [PerlVal]
-parseGrammar = many parseStmt
+parseGrammar = do whiteSpace
+                  many parseStmt
 
 readExpr :: String -> String -> String
 readExpr fromWhere input =
