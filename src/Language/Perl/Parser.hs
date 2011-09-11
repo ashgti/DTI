@@ -52,8 +52,9 @@ brackets = P.brackets lexer
 
 semi  = P.semi lexer
 comma = P.comma lexer
-arrow = P.symbol lexer "->"
 colon = P.colon lexer
+arrow = P.symbol lexer "->"
+fatArrow = symbol "=>"
 
 
 -- Copy Pasta from Text.Parsec.Language because it was really close
@@ -181,19 +182,35 @@ reservedOp = P.reservedOp lexer
 
 commaSep  = P.commaSep lexer
 commaSep1 = P.commaSep1 lexer
--- hashSep p = sepBy p symbol "=>"
+commaOrFatArrowSep1 p = sepBy1 p (comma <|> fatArrow)
 
 {- Parses a block, basically any statements between { and }. -}
 parseBlock :: ParsecT String LexicalInformation Identity PerlVal
 parseBlock = braces (do stmts <- many parseStmt
                         return $ Block stmts)
 
--- parseSubPrototype :: ParsecT String LexicalInformation Identity PerlVal
--- parseSubPrototype = do
---     string "sub"
---     whiteSpace
---     ident <- bareIdentifier
---     return $ Sub ident (Nil "prototype") [] Nothing
+stringToPrototype :: [Char] -> Prototype
+stringToPrototype ('\\':'[':xs) = [AnyOfContext $ stringToPrototype left] ++ stringToPrototype (tail right)
+                                  where (left, right) = break (==']') xs
+stringToPrototype ('\\':x:xs) = [ReferenceContext $ head $ stringToPrototype [x]] ++ stringToPrototype xs
+stringToPrototype ('$':xs) = [ScalarContext] ++ stringToPrototype xs
+stringToPrototype ('@':xs) = [ListContext] ++ stringToPrototype xs
+stringToPrototype ('%':xs) = [ListContext] ++ stringToPrototype xs
+stringToPrototype (';':xs) = [OptionalArgs] ++ stringToPrototype xs
+stringToPrototype (')':xs) = [ConstContext]
+stringToPrototype ('_':xs) = [ImplicitArg]
+stringToPrototype ('[':xs) = [] ++ stringToPrototype xs
+stringToPrototype (']':xs) = [] ++ stringToPrototype xs
+stringToPrototype [] = []
+
+{- Parse an empty set of Parens, just a shortcut function since I write this a lot. -}
+emptyParens = symbol "(" >> symbol ")"
+
+{- Parse a sub prototype, this is independent of the rest of the sub definition. -}
+parseSubPrototype :: ParsecT String LexicalInformation Identity [Char]
+parseSubPrototype = try emptyParens <|> (try $ parens ((many $ oneOf "&@%$\\*;+_ []")
+                                                        <?> "Bad prototype")) 
+                                    <|> do return ""
 
 {- Parse subs with names. This will not parse an anonymous sub. -}
 parseSubWithName :: ParsecT String LexicalInformation Identity PerlVal
@@ -202,17 +219,17 @@ parseSubWithName = do
     whiteSpace
     ident <- bareIdentifier
     whiteSpace
-    
+
+    proto <- parseSubPrototype
     -- TODO(ash_gti): Prototpes, see op.c:9089
-    body <- do semi
-               return $ Nil "..."
-            <|> parseBlock
+    body <- (do semi; return $ Nil "..."
+            <|> parseBlock)
     -- A record of the subs with a recording of their call context
     modifyState (\st -> LexInfo (currentNamespace st)
                                 (M.insert (currentNamespace st ++ "::" ++ ident)
                                           (VoidContext)
                                           (prototypes st)))
-    return $ Sub ident body [] Nothing
+    trace (show proto) $ trace (show $ stringToPrototype proto) return $ Sub ident body (stringToPrototype proto) Nothing
 
 -- TODO(ash_gti): Add state, local, our, and possibly has
 {- Parse a "my" term. -}
@@ -228,11 +245,14 @@ parseMyTerm = do
     assignee <- optionMaybe (do whiteSpace
                                 symbol "="
                                 whiteSpace
-                                option [] (commaSep parseExpr) <|> parens (commaSep parseExpr))
+                                parseExpr)
     if isNothing assignee then return $ Invoke "my" idents
                           else return $ Invoke "=" [ Invoke "my" idents
                                                    , fromJust assignee
                                                    ]
+
+listContents :: PerlVal -> [PerlVal]
+listContents (List a) = a 
 
 {- Parse a potential sub invocation. -}
 parseInvoke :: ParsecT String LexicalInformation Identity PerlVal
@@ -245,12 +265,14 @@ parseInvoke = do
                               otherwise -> trace "not list" [a])
     return $ Invoke word args
 
+{- Parse a  -}
 parseTerm :: ParsecT String LexicalInformation Identity PerlVal
 parseTerm = choice [ parseMyTerm
                    , parseExpr
                    , parseInvoke
                    ]
     
+
 
 parseExpr :: ParsecT String LexicalInformation Identity PerlVal
 parseExpr = (try $ parens (do a <- commaSep1 expr
@@ -262,6 +284,7 @@ parseExpr = (try $ parens (do a <- commaSep1 expr
         <?> "bad expression expression"
     where expr = buildExpressionParser table term 
 
+-- TODO(ash_gti): add the rest of the ops to the table.
 table   = [ [binary "->" AssocLeft]
           , [postfix "++", postfix "--"]
           , [binary "**" AssocRight]
@@ -317,3 +340,4 @@ readExpr fromWhere input =
 
 initialState :: LexicalInformation
 initialState = LexInfo "main" M.empty
+

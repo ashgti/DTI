@@ -55,7 +55,8 @@ type ThrowsError = Either PerlError
 type IOThrowsError = ErrorT PerlError IO
 
 data CallContext = ConstContext | VoidContext | ListContext | ScalarContext
-                 | GlobContext | FunctionContext | ReferenceContext | PlusContext
+                 | GlobContext | FunctionContext | ReferenceContext CallContext | PlusContext
+                 | OptionalArgs | ImplicitArg
                  | AnyOfContext [CallContext]
     deriving (Show, Eq)
 
@@ -66,6 +67,7 @@ data PerlVal =
     Scalar String
   {- List Values -}
   | List [PerlVal]
+  {- Perl Hash values -}
   | HashTable (Data.Map.Map String PerlVal)
   | Number Integer
   | Float Double
@@ -77,7 +79,7 @@ data PerlVal =
         , prototype :: Prototype
         , closure   :: Maybe Env
         }
-  | Invoke String PerlVal
+  | Invoke String [PerlVal]
   | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
   | Port Handle
   | Undef
@@ -109,6 +111,9 @@ showVal (IOFunc _) = "<IO primitive>"
 
 instance Show PerlVal where show = showVal
 
+unwordsPerlList :: PerlVal -> String
+unwordsPerlList (List a) = unwordsList a
+
 unwordsList :: [PerlVal] -> String
 unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
 
@@ -120,3 +125,4 @@ unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
 
 --listContext :: PerlValue -> PerlValue
 --listContext a
+
