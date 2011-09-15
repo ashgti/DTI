@@ -1,2 +1,6 @@
 dist/*
+*.hi
+cabal-devl/*
+dti
+*.o
 *.swp

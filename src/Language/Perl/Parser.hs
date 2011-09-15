@@ -13,13 +13,13 @@ import Debug.Trace
 
 import Language.Perl.Types
 
-
 data LexicalInformation = LexInfo { currentNamespace :: String
                                   , prototypes :: M.Map String CallContext
                                   }
 
 -- Parser Specification --
 
+{- Perl Language definition, its helpful for some token parsing components. -}
 perlDef :: LanguageDef LexicalInformation
 perlDef
     = emptyDef
@@ -33,6 +33,7 @@ perlDef
     , P.caseSensitive = True
     }
 
+lexer :: P.GenTokenParser String LexicalInformation Identity
 lexer    = P.makeTokenParser perlDef
 
 identStart        = oneOf "$%@&*"
@@ -43,7 +44,8 @@ reservedNames = [ "sub"
                 , "my", "our", "local", "has", "state"
                 , "if", "elsif", "else", "unless", "given", "when"
                 , "eval", "BEGIN", "END", "INIT", "CHECK", "UNITCHECK"
-                , "package", "use", "require", "import"]
+                , "package", "use", "require", "import"
+                , "macro", "quasi"]
 
 parens   = P.parens lexer
 braces   = P.braces lexer
@@ -197,11 +199,11 @@ stringToPrototype ('$':xs) = [ScalarContext] ++ stringToPrototype xs
 stringToPrototype ('@':xs) = [ListContext] ++ stringToPrototype xs
 stringToPrototype ('%':xs) = [ListContext] ++ stringToPrototype xs
 stringToPrototype (';':xs) = [OptionalArgs] ++ stringToPrototype xs
-stringToPrototype (')':xs) = [ConstContext]
-stringToPrototype ('_':xs) = [ImplicitArg]
+stringToPrototype (')':xs) = [ConstContext] ++ stringToPrototype xs
+stringToPrototype ('_':xs) = [ImplicitArg] ++ stringToPrototype xs
 stringToPrototype ('[':xs) = [] ++ stringToPrototype xs
 stringToPrototype (']':xs) = [] ++ stringToPrototype xs
-stringToPrototype [] = []
+stringToPrototype _ = []
 
 {- Parse an empty set of Parens, just a shortcut function since I write this a lot. -}
 emptyParens = symbol "(" >> symbol ")"
@@ -217,19 +219,19 @@ parseSubWithName :: ParsecT String LexicalInformation Identity PerlVal
 parseSubWithName = do
     string "sub"
     whiteSpace
-    ident <- bareIdentifier
+    subName <- bareIdentifier
     whiteSpace
 
-    proto <- parseSubPrototype
+    subProto <- parseSubPrototype
     -- TODO(ash_gti): Prototpes, see op.c:9089
-    body <- (do semi; return $ Nil "..."
+    subBody <- (do semi; return $ Nil "..."
             <|> parseBlock)
     -- A record of the subs with a recording of their call context
     modifyState (\st -> LexInfo (currentNamespace st)
-                                (M.insert (currentNamespace st ++ "::" ++ ident)
+                                (M.insert (currentNamespace st ++ "::" ++ subName)
                                           (VoidContext)
                                           (prototypes st)))
-    trace (show proto) $ trace (show $ stringToPrototype proto) return $ Sub ident body (stringToPrototype proto) Nothing
+    trace (show subProto) $ trace (show $ stringToPrototype subProto) return $ Sub subName subBody (stringToPrototype subProto) Nothing
 
 -- TODO(ash_gti): Add state, local, our, and possibly has
 {- Parse a "my" term. -}
@@ -237,22 +239,19 @@ parseMyTerm :: ParsecT String LexicalInformation Identity PerlVal
 parseMyTerm = do
     string "my"
     whiteSpace
-    idents <- try ((do ident <- identifier
-                       return [Scalar ident])
-                   <|> parens (do ident <- commaSep identifier
-                                  return (map Scalar ident))
-                   <?> "Identifier or Identifier List")
+    myIdents <- try ((do singleIdent <- identifier
+                         return [Scalar singleIdent])
+                     <|> parens (do manyIdents <- commaSep identifier
+                                    return (map Scalar manyIdents))
+                     <?> "Identifier or Identifier List")
     assignee <- optionMaybe (do whiteSpace
                                 symbol "="
                                 whiteSpace
                                 parseExpr)
-    if isNothing assignee then return $ Invoke "my" idents
-                          else return $ Invoke "=" [ Invoke "my" idents
+    if isNothing assignee then return $ Invoke "my" myIdents
+                          else return $ Invoke "=" [ Invoke "my" myIdents
                                                    , fromJust assignee
                                                    ]
-
-listContents :: PerlVal -> [PerlVal]
-listContents (List a) = a 
 
 {- Parse a potential sub invocation. -}
 parseInvoke :: ParsecT String LexicalInformation Identity PerlVal
@@ -261,24 +260,23 @@ parseInvoke = do
     whiteSpace
     args <- option [] (do a <- parseExpr
                           return $ case a of
-                              List a -> trace "list" a
-                              otherwise -> trace "not list" [a])
+                              List values -> trace "list" values
+                              _ -> trace "not list" [a])
     return $ Invoke word args
 
-{- Parse a  -}
+-- TODO(ashgti): check if this is the right terminology.
+{- Parse a a term, or at least what I am calling a term. -}
 parseTerm :: ParsecT String LexicalInformation Identity PerlVal
 parseTerm = choice [ parseMyTerm
                    , parseExpr
                    , parseInvoke
                    ]
-    
-
 
 parseExpr :: ParsecT String LexicalInformation Identity PerlVal
-parseExpr = (try $ parens (do a <- commaSep1 expr
+parseExpr = (try $ parens (do a <- commaOrFatArrowSep1 expr
                               return $ List a))
         <|> (try $ parens expr)
-        <|> (try $ do a <- commaSep1 expr
+        <|> (try $ do a <- commaOrFatArrowSep1 expr
                       return $ List $ trace " aa " a)
         <|> (try $ trace "yup" expr)
         <?> "bad expression expression"
@@ -305,8 +303,8 @@ term = try (do symbol "("
                                           if M.lookup ident (prototypes st) == Just ConstContext
                                                then return $ Invoke ident []
                                                else fail "Not found"))
-   <|> do ident <- identifier
-          return $ Scalar ident
+   <|> do scalarIdent <- identifier
+          return $ Scalar scalarIdent
    <|> do x <- stringLiteral
           return $ String x
    <|> do num <- naturalOrFloat

@@ -1,13 +1,13 @@
 module Language.Perl.Types where
 
 import Data.List
-import Data.Array
+--import Data.Array
 import Data.IORef
 import qualified Data.Map
 import Control.Monad.Error
 import Text.Parsec.Error
 import System.IO
-import System.IO.Error
+--import System.IO.Error
 
 data Env = Environment { parentEnv :: Maybe Env
                        , bindings :: IORef [((String, String), IORef PerlVal)]
@@ -74,18 +74,38 @@ data PerlVal =
   | String String
   | Block [PerlVal]
   | PrimitiveFunc ([PerlVal] -> ThrowsError PerlVal)
-  | Sub { name      :: String
-        , body      :: PerlVal
-        , prototype :: Prototype
-        , closure   :: Maybe Env
+  | Sub { pvSubName      :: String
+        , pvSubBody      :: PerlVal
+        , pvSubPrototype :: Prototype
+        , pvSubClosure   :: Maybe Env
         }
   | Invoke String [PerlVal]
   | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
   | Port Handle
+  | Continuation { closure :: Env                       -- Environment of the continuation
+                 , currentCont :: (Maybe DeferredCode)  -- Code of current continuation
+                 , nextCont :: (Maybe PerlVal)       -- Code to resume after body of cont
+                 , extraReturnArgs :: (Maybe [PerlVal]) -- Extra return arguments, to support (values) and (call-with-values)
+                 , dynamicWind :: (Maybe [DynamicWinders]) -- Functions injected by (dynamic-wind)
+                 }
   | Undef
   | EOF
   | NOP
   | Nil String
+
+-- |Container to hold code that is passed to a continuation for deferred execution
+data DeferredCode =
+    SchemeBody [PerlVal] | -- ^A block of Scheme code
+    HaskellBody {
+       contFunction :: (Env -> PerlVal -> PerlVal -> Maybe [PerlVal] -> IOThrowsError PerlVal)
+     , contFunctionArgs :: (Maybe [PerlVal]) -- Arguments to the higher-order function
+    } -- ^A Haskell function
+
+-- |Container to store information from a dynamic-wind
+data DynamicWinders = DynamicWinders {
+    before :: PerlVal -- ^Function to execute when resuming continuation within extent of dynamic-wind
+  , after :: PerlVal -- ^Function to execute when leaving extent of dynamic-wind
+}
 
 showVal :: PerlVal -> String
 showVal (Nil _) = ""
@@ -101,7 +121,7 @@ showVal (Block contents) = "{"++ unwordsList contents ++"}"
 showVal (List contents) = "LIST(" ++ unwordsList contents ++ ")"
 showVal (HashTable _) = "HASH(0x)"
 showVal (PrimitiveFunc _) = "<primitive>"
-showVal (Sub { name = name, body = body }) =
+showVal (Sub { pvSubName = name, pvSubBody = body }) =
   "sub " ++ name ++ " " ++ case body of
       Nil a -> a
       _ -> show body
@@ -111,8 +131,25 @@ showVal (IOFunc _) = "<IO primitive>"
 
 instance Show PerlVal where show = showVal
 
-unwordsPerlList :: PerlVal -> String
-unwordsPerlList (List a) = unwordsList a
+
+trapError :: -- forall (m :: * -> *) e.
+            (MonadError e m, Show e) =>
+             m String -> m String
+trapError action = catchError action (return . show)
+
+extractValue :: ThrowsError a -> a
+extractValue (Right val) = val
+extractValue (Left _) = error "Unexpected error in extractValue; "
+
+runIOThrows :: IOThrowsError String -> IO String
+runIOThrows action = runErrorT (trapError action) >>= return . extractValue
+
+liftThrows :: ThrowsError a -> IOThrowsError a
+liftThrows (Left err) = throwError err
+liftThrows (Right val) = return val
+
+--unwordsPerlList :: PerlVal -> String
+--unwordsPerlList (List a) = unwordsList a
 
 unwordsList :: [PerlVal] -> String
 unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
@@ -125,4 +162,11 @@ unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
 
 --listContext :: PerlValue -> PerlValue
 --listContext a
+
+-- Make an "empty" continuation that does not contain any code
+makeNullContinuation :: Env -> PerlVal
+makeNullContinuation env = Continuation env Nothing Nothing Nothing Nothing
+
+
+
 
