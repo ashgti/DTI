@@ -2,7 +2,7 @@ Name:                dti
 Version:             0.1
 Synopsis:            A perl-like interpreter.
 Description:         Hopefully a nqp interpreter.
-License:             BSD3
+License:             MIT
 License-file:        LICENSE
 Author:              John Harrison
 Maintainer:          ash.gti@gmail.com
