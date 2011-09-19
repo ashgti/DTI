@@ -1,7 +1,7 @@
 Name:                dti
 Version:             0.1
 Synopsis:            A perl-like interpreter.
-Description:         Hopefully a full perl-5.14 interpreter.
+Description:         Hopefully a nqp interpreter.
 License:             BSD3
 License-file:        LICENSE
 Author:              John Harrison
@@ -13,12 +13,16 @@ Build-type:          Simple
 Cabal-version:       >=1.4
 
 Library
-  Build-Depends:   base >= 4 && < 5, haskell98, array, parsec, containers, mtl, transformers
+  Build-Depends:   base >= 4 && < 5, haskell98, array, parsec, containers, mtl, transformers, directory
   Extensions:      ExistentialQuantification
   Hs-Source-Dirs:  src
-  Exposed-Modules: Language.Perl.Parser
-                   Language.Perl.Core
+  Exposed-Modules: Language.Perl.Core
                    Language.Perl.Types
+                   Language.Perl.Variables
+  Other-Modules:   Language.Perl.Macro
+                   Language.Perl.Parser
+                   Language.Perl.Numeric
+                   Language.Perl.Primitives
 
 Executable dti
   Main-is:             shell.hs

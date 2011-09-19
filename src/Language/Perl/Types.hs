@@ -9,13 +9,21 @@ import Text.Parsec.Error
 import System.IO
 --import System.IO.Error
 
-data Env = Environment { parentEnv :: Maybe Env
-                       , bindings :: IORef [((String, String), IORef PerlVal)]
+data Env = Environment { parentEnv :: (Maybe Env)
+                       , bindings :: (IORef [((String, String), IORef PerlVal)])
                        } -- lookup via: (namespace, variable)
 
 nullEnv :: IO Env
 nullEnv = do nullBindings <- newIORef []
              return $ Environment Nothing nullBindings
+
+-- Internal namespace for macros
+macroNamespace :: [Char]
+macroNamespace = "macro"
+
+-- Internal namespace for variables
+varNamespace :: [Char]
+varNamespace = "core"
 
 -- |Types of errors that may occur when evaluating Scheme code
 data PerlError =
@@ -75,12 +83,13 @@ data PerlVal =
   | Block [PerlVal]
   | PrimitiveFunc ([PerlVal] -> ThrowsError PerlVal)
   | Sub { pvSubName      :: String
-        , pvSubBody      :: PerlVal
+        , pvSubBody      :: [PerlVal]
         , pvSubPrototype :: Prototype
         , pvSubClosure   :: Maybe Env
         }
   | Invoke String [PerlVal]
   | IOFunc ([PerlVal] -> IOThrowsError PerlVal)
+  | EvalFunc ([PerlVal] -> IOThrowsError PerlVal)
   | Port Handle
   | Continuation { closure :: Env                       -- Environment of the continuation
                  , currentCont :: (Maybe DeferredCode)  -- Code of current continuation
@@ -95,7 +104,7 @@ data PerlVal =
 
 -- |Container to hold code that is passed to a continuation for deferred execution
 data DeferredCode =
-    SchemeBody [PerlVal] | -- ^A block of Scheme code
+    PerlBody [PerlVal] | -- ^A block of Scheme code
     HaskellBody {
        contFunction :: (Env -> PerlVal -> PerlVal -> Maybe [PerlVal] -> IOThrowsError PerlVal)
      , contFunctionArgs :: (Maybe [PerlVal]) -- Arguments to the higher-order function
@@ -123,14 +132,63 @@ showVal (HashTable _) = "HASH(0x)"
 showVal (PrimitiveFunc _) = "<primitive>"
 showVal (Sub { pvSubName = name, pvSubBody = body }) =
   "sub " ++ name ++ " " ++ case body of
-      Nil a -> a
+      [Nil a] -> a
       _ -> show body
 showVal (Port _) = "GLOB(0x)"
 showVal (IOFunc _) = "<IO primitive>"
--- showVal (EvalFunc _) = "<procedure>"
+showVal (Continuation _ _ _ _ _) = "<Continuation>"
+showVal (EvalFunc _) = "<procedure>"
 
 instance Show PerlVal where show = showVal
 
+instance Ord PerlVal where
+  compare (Number a) (Number b) = compare a b
+  compare (Float a) (Float b) = compare a b
+  compare (String a) (String b) = compare a b
+  compare (Scalar a) (Scalar b) = compare a b
+  compare a b = compare (show a) (show b)
+
+
+-- |Compare two 'PerlVal' instances
+eqv :: [PerlVal] -> ThrowsError PerlVal
+eqv [(Number arg1), (Number arg2)] = if arg1 == arg2 then return $ Number 1
+                                                     else return $ Number 0
+eqv [(Float arg1), (Float arg2)] = if arg1 == arg2 then return $ Number 1
+                                                   else return $ Number 0
+eqv [(String arg1), (String arg2)] = if arg1 == arg2 then return $ Number 1
+                                                     else return $ Number 0
+eqv [(Scalar arg1), (Scalar arg2)] = if arg1 == arg2 then return $ Number 1
+                                                     else return $ Number 0
+eqv [(HashTable arg1), (HashTable arg2)] =
+  eqv [List $ (map (\ (x, y) -> List [String x, y]) $ Data.Map.toAscList arg1),
+       List $ (map (\ (x, y) -> List [String x, y]) $ Data.Map.toAscList arg2)]
+eqv [l1@(List _), l2@(List _)] = eqvList eqv [l1, l2]
+eqv [_, _] = return $ Number 0
+eqv badArgList = throwError $ NumArgs 2 badArgList
+
+eqvList :: ([PerlVal] -> ThrowsError PerlVal) -> [PerlVal] -> ThrowsError PerlVal
+eqvList eqvFunc [(List arg1), (List arg2)] = return $ Number $ if (length arg1 == length arg2) &&
+                                                                  (all eqvPair $ zip arg1 arg2)
+                                                                    then 1
+                                                                    else 0
+    where eqvPair (x1, x2) = case eqvFunc [x1, x2] of
+                               Left _ -> False
+                               Right (Number val) -> if val == 0 then False
+                                                                 else True
+                               _ -> False -- OK?
+eqvList _ _ = throwError $ Default "Unexpected error in eqvList"
+
+eqVal :: PerlVal -> PerlVal -> Bool
+eqVal a b = do
+  let result = eqv [a, b]
+  case result of
+    Left _ -> False
+    Right (Number val) -> if val == 1 then True
+                                      else False
+    _ -> False -- Is this OK?
+
+instance Eq PerlVal where
+  x == y = eqVal x y
 
 trapError :: -- forall (m :: * -> *) e.
             (MonadError e m, Show e) =>
@@ -153,6 +211,16 @@ liftThrows (Right val) = return val
 
 unwordsList :: [PerlVal] -> String
 unwordsList vals = foldr (\w s -> w ++ s) "" (intersperse "," $ map show vals)
+
+-- Make a continuation that takes a higher-order function (written in Haskell)
+makeCPS :: Env -> PerlVal -> (Env -> PerlVal -> PerlVal -> Maybe [PerlVal] -> IOThrowsError PerlVal) -> PerlVal
+makeCPS env cont@(Continuation _ _ _ _ dynWind) cps = Continuation env (Just (HaskellBody cps Nothing)) (Just cont) Nothing dynWind
+makeCPS env cont cps = Continuation env (Just (HaskellBody cps Nothing)) (Just cont) Nothing Nothing -- This overload just here for completeness; it should never be used
+
+-- Make a continuation that stores a higher-order function and arguments to that function
+makeCPSWArgs :: Env -> PerlVal -> (Env -> PerlVal -> PerlVal -> Maybe [PerlVal] -> IOThrowsError PerlVal) -> [PerlVal] -> PerlVal
+makeCPSWArgs env cont@(Continuation _ _ _ _ dynWind) cps args = Continuation env (Just (HaskellBody cps (Just args))) (Just cont) Nothing dynWind
+makeCPSWArgs env cont cps args = Continuation env (Just (HaskellBody cps (Just args))) (Just cont) Nothing Nothing -- This overload just here for completeness; it should never be used
 
 --numericContext :: PerlValue -> PerlValue
 --numericContext 

@@ -10,12 +10,16 @@ import Text.Parsec.Language
 import Data.Functor.Identity
 import qualified Text.Parsec.Token as P
 import Debug.Trace
+import Control.Monad.Error
 
 import Language.Perl.Types
 
 data LexicalInformation = LexInfo { currentNamespace :: String
                                   , prototypes :: M.Map String CallContext
                                   }
+
+initialState :: LexicalInformation
+initialState = LexInfo "main" M.empty
 
 -- Parser Specification --
 
@@ -224,14 +228,14 @@ parseSubWithName = do
 
     subProto <- parseSubPrototype
     -- TODO(ash_gti): Prototpes, see op.c:9089
-    subBody <- (do semi; return $ Nil "..."
-            <|> parseBlock)
+    (Block subBody) <- (do semi; return $ Nil "..."
+                       <|> parseBlock)
     -- A record of the subs with a recording of their call context
     modifyState (\st -> LexInfo (currentNamespace st)
                                 (M.insert (currentNamespace st ++ "::" ++ subName)
                                           (VoidContext)
                                           (prototypes st)))
-    trace (show subProto) $ trace (show $ stringToPrototype subProto) return $ Sub subName subBody (stringToPrototype subProto) Nothing
+    return $ Sub subName subBody (stringToPrototype subProto) Nothing
 
 -- TODO(ash_gti): Add state, local, our, and possibly has
 {- Parse a "my" term. -}
@@ -260,9 +264,9 @@ parseInvoke = do
     whiteSpace
     args <- option [] (do a <- parseExpr
                           return $ case a of
-                              List values -> trace "list" values
-                              _ -> trace "not list" [a])
-    return $ Invoke word args
+                              List values -> values
+                              _ -> error "Failed to find arguments of the Invoke")
+    return $ Invoke ('&':word) args
 
 -- TODO(ashgti): check if this is the right terminology.
 {- Parse a a term, or at least what I am calling a term. -}
@@ -277,8 +281,8 @@ parseExpr = (try $ parens (do a <- commaOrFatArrowSep1 expr
                               return $ List a))
         <|> (try $ parens expr)
         <|> (try $ do a <- commaOrFatArrowSep1 expr
-                      return $ List $ trace " aa " a)
-        <|> (try $ trace "yup" expr)
+                      return $ List $ a)
+        <|> (try $ expr)
         <?> "bad expression expression"
     where expr = buildExpressionParser table term 
 
@@ -298,11 +302,11 @@ table   = [ [binary "->" AssocLeft]
 term = try (do symbol "("
                symbol ")"
                return Undef)
-   <|> (trace "trying prototypes" try (do st <- getState
-                                          ident <- bareIdentifier
-                                          if M.lookup ident (prototypes st) == Just ConstContext
-                                               then return $ Invoke ident []
-                                               else fail "Not found"))
+   <|> try (do st <- getState
+               ident <- bareIdentifier
+               if M.lookup ident (prototypes st) == Just ConstContext
+                   then return $ Invoke ident []
+                   else fail "Not found")
    <|> do scalarIdent <- identifier
           return $ Scalar scalarIdent
    <|> do x <- stringLiteral
@@ -315,9 +319,9 @@ term = try (do symbol "("
                char ','
                return Undef)
 
-binary  name = Infix (do reservedOp name; return $ \ x y -> Invoke ("Op"++name) [x, y])
-prefix  name = Prefix (do reservedOp name; return $ \ x -> Invoke ("Op"++name) [x])
-postfix name = Postfix (do reservedOp name; return $ \ x -> Invoke ("Op"++name) [x])
+binary  name = Infix (do reservedOp name; return $ \ x y -> Invoke (name) [x, y])
+prefix  name = Prefix (do reservedOp name; return $ \ x -> Invoke (name) [x])
+postfix name = Postfix (do reservedOp name; return $ \ x -> Invoke (name) [x])
 
 parseStmt :: ParsecT String LexicalInformation Identity PerlVal
 parseStmt = choice [ parseBlock
@@ -330,12 +334,15 @@ parseGrammar :: ParsecT String LexicalInformation Identity [PerlVal]
 parseGrammar = do whiteSpace
                   many parseStmt
 
-readExpr :: String -> String -> String
-readExpr fromWhere input =
-    case runParser parseGrammar initialState fromWhere input of 
-          Right val -> "Found: " ++ unlines [show i | i <- val]
-          Left  err -> "Err: " ++ show err
+readOrThrow :: String -> String -> ThrowsError PerlVal
+readOrThrow fromWhere input =
+    case runParser parseGrammar initialState fromWhere input of
+        Left err -> throwError $ Parser err
+        Right val -> return $ Block val
 
-initialState :: LexicalInformation
-initialState = LexInfo "main" M.empty
+readExpr :: String -> ThrowsError PerlVal
+readExpr = readOrThrow "Foo"
+
+-- readExprList :: String -> ThrowsError [LispVal]
+-- readExprList = readOrThrow (endBy mainParser whiteSpace)
 
